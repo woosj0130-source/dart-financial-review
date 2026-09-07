@@ -84,6 +84,33 @@ def request_json(endpoint: str, params: dict) -> dict:
     return data
 
 
+def read_dart_xml_error(content: bytes) -> str | None:
+    """DART가 ZIP 대신 보낸 XML 오류에서 코드와 안내 문구를 읽는다."""
+    try:
+        root = ET.fromstring(content)
+    except ET.ParseError:
+        return None
+
+    status = (root.findtext("status") or "").strip()
+    message = (root.findtext("message") or "").strip()
+    if not status and not message:
+        return None
+
+    suggestions = {
+        "010": "인증키 관리 화면에서 현재 Key를 다시 복사해 주세요.",
+        "011": "인증키가 일시 중지된 상태인지 확인해 주세요.",
+        "012": "DART에 등록한 접근 IP 또는 웹 사용환경을 확인해 주세요.",
+        "020": "요청 한도를 초과했습니다. 오픈API 이용현황을 확인해 주세요.",
+        "800": "DART 시스템 점검이 끝난 뒤 다시 시도해 주세요.",
+        "900": "일시적인 DART 오류일 수 있으므로 잠시 후 다시 시도해 주세요.",
+        "901": "개인정보 보유기간이 만료된 Key입니다. DART 계정 상태를 확인해 주세요.",
+    }
+    code_text = f" {status}" if status else ""
+    message_text = message or "상세 메시지가 없습니다."
+    suggestion = suggestions.get(status, "API Key와 DART 서비스 상태를 확인해 주세요.")
+    return f"DART 오류{code_text}: {message_text} {suggestion}"
+
+
 @st.cache_data(ttl=24 * 60 * 60, show_spinner=False)
 def load_corporations(api_key: str) -> list[dict]:
     """DART 전체 기업 고유번호 ZIP을 내려받아 회사 목록으로 만든다."""
@@ -94,14 +121,30 @@ def load_corporations(api_key: str) -> list[dict]:
             timeout=30,
         )
         response.raise_for_status()
-        with zipfile.ZipFile(io.BytesIO(response.content)) as archive:
-            xml_bytes = archive.read("CORPCODE.xml")
-    except (requests.RequestException, zipfile.BadZipFile, KeyError) as exc:
+    except requests.RequestException as exc:
         raise DartError(
-            "기업 목록을 받지 못했습니다. API Key가 올바른지와 인터넷 연결을 확인해 주세요."
+            "DART 서버에 연결하지 못했습니다. 인터넷 연결과 DART 서비스 상태를 확인해 주세요."
         ) from exc
 
-    root = ET.fromstring(xml_bytes)
+    try:
+        with zipfile.ZipFile(io.BytesIO(response.content)) as archive:
+            xml_bytes = archive.read("CORPCODE.xml")
+    except zipfile.BadZipFile as exc:
+        dart_error = read_dart_xml_error(response.content)
+        if dart_error:
+            raise DartError(dart_error) from exc
+        raise DartError(
+            "DART가 기업목록 ZIP이 아닌 예상하지 못한 응답을 보냈습니다. 잠시 후 다시 시도해 주세요."
+        ) from exc
+    except KeyError as exc:
+        raise DartError(
+            "DART 기업목록 파일 안에서 CORPCODE.xml을 찾지 못했습니다. 잠시 후 다시 시도해 주세요."
+        ) from exc
+
+    try:
+        root = ET.fromstring(xml_bytes)
+    except ET.ParseError as exc:
+        raise DartError("DART 기업목록 XML을 읽지 못했습니다. 잠시 후 다시 시도해 주세요.") from exc
     companies = []
     for item in root.findall("list"):
         companies.append(
@@ -486,6 +529,7 @@ with st.sidebar:
         )
     search_clicked = st.button("기업 검색", type="primary", width="stretch")
 
+search_completed = False
 if search_clicked:
     # 새 검색 결과가 이전 검색 결과와 섞이지 않게 먼저 비운다.
     st.session_state.pop("matches", None)
@@ -501,11 +545,12 @@ if search_clicked:
                 matches = search_companies(companies, company_query)
             st.session_state["api_key"] = api_key
             st.session_state["matches"] = matches
+            search_completed = True
         except DartError as exc:
             st.error(str(exc))
 
 matches = st.session_state.get("matches", [])
-if search_clicked and not matches and get_api_key(typed_key):
+if search_clicked and search_completed and not matches:
     st.info("입력한 이름이 포함된 기업을 찾지 못했습니다. 정식 기업명 일부로 다시 검색해 주세요.")
 
 if matches:
