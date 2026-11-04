@@ -22,6 +22,9 @@ RECEIVABLE_ACCOUNTS = (TRADE_RECEIVABLES, COMBINED_RECEIVABLES)
 REVIEW_STATUSES = ("미검토", "추가 자료 필요", "원인 확인")
 REVIEW_FIELDS = ("corp_code", "account", "comparison", "status", "memo", "saved_at")
 REVIEW_MEMO_LIMIT = 2000
+REVIEW_BACKUP_VERSION = 2
+MARGIN_REVIEW_ACCOUNTS = ("영업이익률", "순이익률")
+CASH_FLOW_DIRECTION_ACCOUNT = "당기순이익과 영업활동현금흐름"
 COMBINED_RECEIVABLE_IDS = [
     "ifrs-full_TradeAndOtherCurrentReceivables",
     "ifrs_TradeAndOtherCurrentReceivables",
@@ -452,7 +455,7 @@ def find_review_points(
 
     # 2. 영업이익률과 순이익률의 연도 간 차이를 퍼센트포인트(%p)로 확인한다.
     year_columns = list(ratio_frame.columns)
-    for ratio_name in ["영업이익률", "순이익률"]:
+    for ratio_name in MARGIN_REVIEW_ACCOUNTS:
         for previous_column, current_column in zip(year_columns, year_columns[1:]):
             previous_ratio = ratio_frame.loc[ratio_name, previous_column]
             current_ratio = ratio_frame.loc[ratio_name, current_column]
@@ -465,6 +468,8 @@ def find_review_points(
                 review_points.append(
                     {
                         "title": f"{ratio_name}의 큰 변화",
+                        "account": ratio_name,
+                        "comparison": comparison,
                         "reason": (
                             f"{comparison} {ratio_name}이 {previous_ratio:.1f}%에서 "
                             f"{current_ratio:.1f}%로 {change:+.1f}%p 변했습니다. "
@@ -516,6 +521,8 @@ def find_review_points(
             review_points.append(
                 {
                     "title": "순이익과 영업활동현금흐름의 방향 차이",
+                    "account": CASH_FLOW_DIRECTION_ACCOUNT,
+                    "comparison": year_column.rstrip("년"),
                     "reason": (
                         f"{year_column} 당기순이익은 {net_income:,.0f}원으로 양수이지만, "
                         f"영업활동현금흐름은 {operating_cash_flow:,.0f}원으로 음수입니다."
@@ -530,9 +537,14 @@ def find_review_points(
 def read_review_backup(content: bytes) -> list[dict]:
     """이 앱에서 내보낸 검토 기록을 확인한 뒤 반환한다."""
     backup = json.loads(content)
-    if not isinstance(backup, dict) or backup.get("version") != 1:
+    if not isinstance(backup, dict) or backup.get("version") not in (1, REVIEW_BACKUP_VERSION):
         raise ValueError("지원하지 않는 검토 기록 파일입니다.")
 
+    legacy_backup = backup["version"] == 1
+    allowed_accounts = (
+        RECEIVABLE_ACCOUNTS if legacy_backup
+        else (*ACCOUNT_RULES, COMBINED_RECEIVABLES, *MARGIN_REVIEW_ACCOUNTS, CASH_FLOW_DIRECTION_ACCOUNT)
+    )
     records = backup.get("records")
     if not isinstance(records, list):
         raise ValueError("검토 기록 목록이 없습니다.")
@@ -542,12 +554,17 @@ def read_review_backup(content: bytes) -> list[dict]:
             or record.keys() != set(REVIEW_FIELDS)
             or not all(isinstance(value, str) for value in record.values())
             or not re.fullmatch(r"[0-9]{8}", record["corp_code"])
-            or not re.fullmatch(r"[0-9]{4}→[0-9]{4}", record["comparison"])
-            or record["account"] not in RECEIVABLE_ACCOUNTS
+            or record["account"] not in allowed_accounts
             or record["status"] not in REVIEW_STATUSES
             or len(record["memo"]) > REVIEW_MEMO_LIMIT
         ):
             raise ValueError("검토 기록에 잘못된 항목이 있습니다.")
+        period_pattern = (
+            r"[0-9]{4}" if record["account"] == CASH_FLOW_DIRECTION_ACCOUNT
+            else r"[0-9]{4}→[0-9]{4}"
+        )
+        if not re.fullmatch(period_pattern, record["comparison"]):
+            raise ValueError("검토 기록의 사업연도를 확인해 주세요.")
         saved_at = datetime.fromisoformat(record["saved_at"])
         if saved_at.utcoffset() != timezone.utc.utcoffset(None):
             raise ValueError("검토 기록의 저장 시각을 확인해 주세요.")
@@ -556,13 +573,14 @@ def read_review_backup(content: bytes) -> list[dict]:
 
 
 @st.fragment
-def show_receivable_reviews(company: dict, review_points: list[dict]):
-    """채권 검토 상태와 메모를 추가하고 세션의 기록을 백업한다."""
-    st.subheader("채권 검토 기록")
+def show_review_records(company: dict, review_points: list[dict]):
+    """검토 포인트별 상태와 메모를 추가하고 세션의 기록을 백업한다."""
+    st.subheader("검토 기록")
     st.caption(
         "기록은 현재 세션에 보관됩니다. 새로 접속할 때 이어서 검토하려면 "
         "JSON 파일로 내려받아 두세요."
     )
+    # 배포 전부터 열린 세션의 채권 기록도 이어서 사용한다.
     records = st.session_state.setdefault("receivable_review_records", [])
     with st.expander("검토 기록 불러오기"):
         backup = st.file_uploader("이 앱에서 내려받은 JSON 파일", type="json")
@@ -585,12 +603,11 @@ def show_receivable_reviews(company: dict, review_points: list[dict]):
     cases = {
         (point["comparison"], point["account"])
         for point in review_points
-        if point.get("account") in RECEIVABLE_ACCOUNTS
     }
     cases.update((record["comparison"], record["account"]) for record in company_records)
     if cases:
         comparison, account = st.selectbox(
-            "기록할 채권 검토 항목",
+            "기록할 검토 항목",
             sorted(cases, reverse=True),
             format_func=lambda case: f"{case[0]} · {case[1]}",
             key=f"review-case-{corp_code}",
@@ -631,12 +648,14 @@ def show_receivable_reviews(company: dict, review_points: list[dict]):
                     if record["memo"]:
                         st.text(record["memo"])
     else:
-        st.info("현재 조회에서 기록할 채권 검토 항목이 없습니다.")
+        st.info("현재 기준에 해당하는 검토 항목이 없습니다.")
 
     if records:
         st.download_button(
             "전체 검토 기록 내려받기",
-            data=json.dumps({"version": 1, "records": records}, ensure_ascii=False, indent=2),
+            data=json.dumps(
+                {"version": REVIEW_BACKUP_VERSION, "records": records}, ensure_ascii=False, indent=2
+            ),
             file_name="dart_review_history.json",
             mime="application/json",
             on_click="ignore",
@@ -761,7 +780,7 @@ def show_financial_results(
                 "이는 회계처리의 적정성을 의미하지 않습니다."
             )
 
-        show_receivable_reviews(selected, review_points)
+        show_review_records(selected, review_points)
 
     with data_tab:
         st.caption("금액 단위: 원 / DART 사업보고서의 연결재무제표(CFS) 기준")
@@ -853,9 +872,10 @@ def show_home():
             margin: 1.55rem 0 .65rem; color: #666156; font-size: .8rem; font-weight: 650;
         }
         .dart-hero-content h1 {
-            color: #292923; font-family: "Noto Serif KR", "Batang", "AppleMyungjo", Georgia, serif;
+            color: #292923;
+            font-family: "Pretendard", "Noto Sans KR", "Apple SD Gothic Neo", "Malgun Gothic", sans-serif;
             font-size: clamp(1.85rem, 3.8vw, 3.2rem);
-            font-weight: 700; line-height: 1.22; letter-spacing: -.045em;
+            font-weight: 700; line-height: 1.22; letter-spacing: -.035em;
             margin: 1.55rem 0 .65rem; padding: 0;
         }
         .dart-hero-lead { color: #5b594f; line-height: 1.6; margin: 0; }
@@ -871,12 +891,16 @@ def show_home():
             font-variant-numeric: tabular-nums; letter-spacing: -.055em; margin: 0;
         }
         .dart-hero-kpi:last-child dd { color: #554100; }
-        .st-key-dart_hero button {
+        :is(.st-key-dart_hero, .st-key-dart_load_financials) button {
             background: #ffdc39; color: #202124; border: 1px solid #ffdc39;
             border-radius: 4px; font-weight: 750; min-height: 2.7rem;
         }
-        .st-key-dart_hero button:hover { background: #ffe675; color: #202124; }
-        .st-key-dart_hero button:focus-visible { outline: 2px solid #876900; outline-offset: 3px; }
+        :is(.st-key-dart_hero, .st-key-dart_load_financials) button:hover {
+            background: #ffe675; color: #202124;
+        }
+        :is(.st-key-dart_hero, .st-key-dart_load_financials) button:focus-visible {
+            outline: 2px solid #876900; outline-offset: 3px;
+        }
         [data-testid="stSidebar"] button[kind="primary"] {
             background: #fff; color: #292923; border-color: #d6c98c;
         }
@@ -1020,7 +1044,9 @@ elif matches:
     )
     selected = matches[selected_index]
 
-    if st.button("최근 3개년 연결재무제표 불러오기", type="primary"):
+    with st.container(key="dart_load_financials"):
+        load_clicked = st.button("최근 3개년 연결재무제표 불러오기", type="primary")
+    if load_clicked:
         try:
             with st.spinner("최근 사업보고서를 찾고 핵심 계정을 정리하고 있습니다..."):
                 found_years, checked_years = collect_recent_three_years(
