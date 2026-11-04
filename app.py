@@ -26,6 +26,36 @@ COMBINED_RECEIVABLE_IDS = [
     "ifrs-full_TradeAndOtherCurrentReceivables",
     "ifrs_TradeAndOtherCurrentReceivables",
 ]
+HYUNDAI_DEMO_COMPANY = {"corp_name": "현대자동차", "corp_code": "00164742", "stock_code": "005380"}
+
+
+def hyundai_demo_years() -> list[tuple[int, list[dict]]]:
+    """현대차 연결재무제표의 시연용 발췌값을 원 단위로 반환한다."""
+    amounts_in_millions = {
+        "매출액": (175_231_153, 186_254_472),
+        "영업이익": (14_239_592, 11_467_851),
+        "당기순이익": (13_229_908, 10_364_775),
+        "자산총계": (339_798_429, 368_844_849),
+        "부채총계": (219_522_496, 241_196_612),
+        "매출채권": (5_908_079, 8_600_419),
+        "재고자산": (19_791_007, 20_661_752),
+        "영업활동현금흐름": (-5_661_641, -5_991_270),
+    }
+    receipts = {2024: "20250312001148", 2025: "20260318001394"}
+    return [
+        (
+            year,
+            [
+                {
+                    "account_nm": account,
+                    "thstrm_amount": str(amounts[index] * 1_000_000),
+                    "rcept_no": receipt,
+                }
+                for account, amounts in amounts_in_millions.items()
+            ],
+        )
+        for index, (year, receipt) in enumerate(receipts.items())
+    ]
 
 # 회사마다 계정 ID나 한글 계정명이 조금씩 달라서 ID와 이름을 함께 확인한다.
 ACCOUNT_RULES = {
@@ -663,9 +693,156 @@ def show_financial_charts(
     )
 
 
+def show_financial_results(
+    selected: dict,
+    found_years: list[tuple[int, list[dict]]],
+    checked_years: list[int],
+    account_growth_limit: float,
+    margin_change_limit: float,
+    relationship_gap_limit: float,
+    *,
+    demo: bool = False,
+):
+    """실시간 조회와 공시 예시의 결과를 같은 흐름으로 표시한다."""
+    frame, missing, receivable_sources = make_result(found_years)
+    years = [year for year, _ in found_years]
+    st.subheader("현대자동차 검토 예시" if demo else "2. 조회 결과")
+    st.write(
+        f'**기업:** {selected["corp_name"]}  |  '
+        f'**종목코드:** {selected["stock_code"] or "없음"}  |  '
+        f'**사업연도:** {min(years)}~{max(years)}년'
+    )
+    growth_frame = calculate_growth_rates(frame)
+    if demo:
+        st.caption("2024·2025년 사업보고서에서 발췌한 시연용 수치입니다.")
+        comparison = growth_frame.columns[-1]
+        sales_growth = growth_frame.loc["매출액", comparison]
+        receivable_growth = growth_frame.loc[TRADE_RECEIVABLES, comparison]
+        sales, receivables, gap = st.columns(3)
+        sales.metric("매출액 증가율", format_percent(sales_growth, show_plus=True), border=True)
+        receivables.metric(
+            "유동 매출채권 증가율",
+            format_percent(receivable_growth, show_plus=True),
+            border=True,
+        )
+        gap.metric("매출 증가율과의 차이", f"{receivable_growth - sales_growth:+.1f}%p", border=True)
+
+    st.caption("금액 단위: 원 / DART 사업보고서의 연결재무제표(CFS) 기준")
+    st.dataframe(
+        frame.style.format(format_won), width="stretch", placeholder="자료 없음"
+    )
+    if receivable_sources:
+        source_labels = [
+            f"{year}년 {source['name']}" for year, source in receivable_sources.items()
+        ]
+        st.caption("채권 공시 계정명 · " + " / ".join(source_labels))
+
+    st.subheader("3. 전년 대비 증감률")
+    if (
+        TRADE_RECEIVABLES in frame.index
+        and COMBINED_RECEIVABLES in frame.index
+        and frame.loc[[TRADE_RECEIVABLES, COMBINED_RECEIVABLES]].notna().any(axis=1).all()
+    ):
+        st.warning(
+            "사업연도별 채권 계정의 범위가 다릅니다. "
+            "매출채권과 매출채권 및 기타채권 사이의 증감률은 계산하지 않습니다."
+        )
+    st.dataframe(
+        growth_frame.style.format(
+            lambda value: format_percent(value, show_plus=True)
+        ),
+        width="stretch",
+        placeholder="계산 불가",
+    )
+
+    ratio_frame = calculate_financial_ratios(frame)
+    st.subheader("4. 주요 재무비율")
+    st.dataframe(
+        ratio_frame.style.format(format_percent),
+        width="stretch",
+        placeholder="계산 불가",
+    )
+
+    review_points = find_review_points(
+        frame,
+        growth_frame,
+        ratio_frame,
+        account_growth_limit,
+        margin_change_limit,
+        relationship_gap_limit,
+    )
+    st.subheader("5. 추가 검토 포인트")
+    st.caption(
+        "아래 항목은 설정한 숫자 기준에 해당한 항목을 정리한 것이며, "
+        "이상·위험·부정 또는 오류를 판정한 결과가 아닙니다."
+    )
+
+    if review_points:
+        for number, point in enumerate(review_points, start=1):
+            with st.container(border=True):
+                st.markdown(f"**{number}. {point['title']}**")
+                st.write(point["reason"])
+                if point.get("account") in RECEIVABLE_ACCOUNTS:
+                    links = receivable_filing_links(
+                        point["comparison"], receivable_sources
+                    )
+                    if links:
+                        st.markdown("**공시 원문** · " + " / ".join(links))
+                    if len(links) < 2:
+                        st.caption("일부 공시 링크가 없습니다. DART에서 해당 연도 사업보고서를 검색해 주세요.")
+                    st.write(
+                        "**공개 공시에서 확인** · 연결재무제표 주석에서 채권 구성, "
+                        "손실충당금, 공시된 연령분석을 확인합니다."
+                    )
+                    if selected["stock_code"] == "005380" and point["comparison"].endswith("→2025"):
+                        st.caption("현대자동차 2025년 연결재무제표 주석 3번 ‘매출채권’에 채권 내역과 연령분석이 있습니다.")
+                    st.write(
+                        "**회사에 요청할 자료** · 거래처별 채권 원장, 기말 이후 "
+                        "회수 내역과 입금 증빙, 주요 거래처의 결제 조건을 확인합니다."
+                    )
+                else:
+                    st.caption(f"추가 확인 예시: {point['next_step']}")
+    else:
+        st.success(
+            "현재 설정한 기준에 해당하는 추가 검토 포인트가 없습니다. "
+            "이는 회계처리의 적정성을 의미하지 않습니다."
+        )
+
+    show_receivable_reviews(selected, review_points)
+    show_financial_charts(frame, growth_frame, ratio_frame)
+
+    if not demo and len(found_years) < 3:
+        st.warning(
+            f"최근 {len(found_years)}개 사업연도만 찾았습니다. "
+            f"확인한 연도: {', '.join(map(str, checked_years))}"
+        )
+    if missing:
+        st.caption(
+            "‘자료 없음’은 공시에 별도 항목이 없거나 현재 계정 매핑에서 "
+            "금액을 확인하지 못한 경우입니다."
+        )
+        with st.expander(f"찾지 못한 계정 {len(missing)}건과 이유"):
+            for reason in missing:
+                st.write(f"- {reason}")
+
+    st.info(
+        "기업별 계정명과 계정 ID가 다를 수 있으므로 일부 항목은 '자료 없음'으로 표시될 수 있습니다. "
+        "최종 확인에는 DART 원문 사업보고서와 주석을 이용해 주세요."
+    )
+    st.caption(
+        "위 지표는 공개 재무정보를 이용한 단순 계산 결과이며, "
+        "특정 회계처리의 적정성이나 부정·오류 여부를 판단하지 않습니다."
+    )
+
+
 st.set_page_config(page_title="DART 재무제표 조회", page_icon="📊", layout="wide")
-st.title("DART 최근 3개년 연결재무제표 조회")
-st.caption("공개 재무정보를 불러오는 1단계 도구이며, 부정이나 회계오류를 판단하지 않습니다.")
+st.title("DART 공시 검토 도구")
+st.write("연결재무제표의 변동을 찾고 공시 근거와 후속 검토 기록을 한 화면에서 확인합니다.")
+with st.container(border=True):
+    st.markdown("**현대자동차 매출채권 검토 예시**")
+    st.caption("API 키 없이 2024·2025년 공시 수치로 검토 알림과 기록 기능을 체험할 수 있습니다.")
+    if st.button("현대차 예시 열기"):
+        st.session_state["show_hyundai_demo"] = True
 
 with st.sidebar:
     st.header("조회 설정")
@@ -699,6 +876,7 @@ with st.sidebar:
 
 search_completed = False
 if search_clicked:
+    st.session_state.pop("show_hyundai_demo", None)
     # 새 검색 결과가 이전 검색 결과와 섞이지 않게 먼저 비운다.
     st.session_state.pop("matches", None)
     api_key = get_api_key(typed_key)
@@ -721,7 +899,13 @@ matches = st.session_state.get("matches", [])
 if search_clicked and search_completed and not matches:
     st.info("입력한 이름이 포함된 기업을 찾지 못했습니다. 정식 기업명 일부로 다시 검색해 주세요.")
 
-if matches:
+if st.session_state.get("show_hyundai_demo"):
+    show_financial_results(
+        HYUNDAI_DEMO_COMPANY, hyundai_demo_years(), [],
+        account_growth_limit, margin_change_limit, relationship_gap_limit,
+        demo=True,
+    )
+elif matches:
     st.subheader("1. 조회할 기업 선택")
 
     def company_label(company: dict) -> str:
@@ -748,120 +932,9 @@ if matches:
                     "연결 대상 종속회사가 없는 기업이거나 사업보고서가 아직 제출되지 않았을 수 있습니다."
                 )
             else:
-                frame, missing, receivable_sources = make_result(found_years)
-                years = [year for year, _ in found_years]
-                st.subheader("2. 조회 결과")
-                st.write(
-                    f'**기업:** {selected["corp_name"]}  |  '
-                    f'**종목코드:** {selected["stock_code"] or "없음"}  |  '
-                    f'**사업연도:** {min(years)}~{max(years)}년'
-                )
-                st.caption("금액 단위: 원 / DART 사업보고서의 연결재무제표(CFS) 기준")
-                st.dataframe(
-                    frame.style.format(format_won), width="stretch", placeholder="자료 없음"
-                )
-                if receivable_sources:
-                    source_labels = [
-                        f"{year}년 {source['name']}" for year, source in receivable_sources.items()
-                    ]
-                    st.caption("채권 공시 계정명 · " + " / ".join(source_labels))
-
-                growth_frame = calculate_growth_rates(frame)
-                st.subheader("3. 전년 대비 증감률")
-                if (
-                    TRADE_RECEIVABLES in frame.index
-                    and COMBINED_RECEIVABLES in frame.index
-                    and frame.loc[[TRADE_RECEIVABLES, COMBINED_RECEIVABLES]].notna().any(axis=1).all()
-                ):
-                    st.warning(
-                        "사업연도별 채권 계정의 범위가 다릅니다. "
-                        "매출채권과 매출채권 및 기타채권 사이의 증감률은 계산하지 않습니다."
-                    )
-                st.dataframe(
-                    growth_frame.style.format(
-                        lambda value: format_percent(value, show_plus=True)
-                    ),
-                    width="stretch",
-                    placeholder="계산 불가",
-                )
-
-                ratio_frame = calculate_financial_ratios(frame)
-                st.subheader("4. 주요 재무비율")
-                st.dataframe(
-                    ratio_frame.style.format(format_percent),
-                    width="stretch",
-                    placeholder="계산 불가",
-                )
-
-                review_points = find_review_points(
-                    frame,
-                    growth_frame,
-                    ratio_frame,
-                    account_growth_limit,
-                    margin_change_limit,
-                    relationship_gap_limit,
-                )
-                st.subheader("5. 추가 검토 포인트")
-                st.caption(
-                    "아래 항목은 설정한 숫자 기준에 해당한 항목을 정리한 것이며, "
-                    "이상·위험·부정 또는 오류를 판정한 결과가 아닙니다."
-                )
-
-                if review_points:
-                    for number, point in enumerate(review_points, start=1):
-                        with st.container(border=True):
-                            st.markdown(f"**{number}. {point['title']}**")
-                            st.write(point["reason"])
-                            if point.get("account") in RECEIVABLE_ACCOUNTS:
-                                links = receivable_filing_links(
-                                    point["comparison"], receivable_sources
-                                )
-                                if links:
-                                    st.markdown("**공시 원문** · " + " / ".join(links))
-                                if len(links) < 2:
-                                    st.caption("일부 공시 링크가 없습니다. DART에서 해당 연도 사업보고서를 검색해 주세요.")
-                                st.write(
-                                    "**공개 공시에서 확인** · 연결재무제표 주석에서 채권 구성, "
-                                    "손실충당금, 공시된 연령분석을 확인합니다."
-                                )
-                                if selected["stock_code"] == "005380" and point["comparison"].endswith("→2025"):
-                                    st.caption("현대자동차 2025년 연결재무제표 주석 3번 ‘매출채권’에 채권 내역과 연령분석이 있습니다.")
-                                st.write(
-                                    "**회사에 요청할 자료** · 거래처별 채권 원장, 기말 이후 "
-                                    "회수 내역과 입금 증빙, 주요 거래처의 결제 조건을 확인합니다."
-                                )
-                            else:
-                                st.caption(f"추가 확인 예시: {point['next_step']}")
-                else:
-                    st.success(
-                        "현재 설정한 기준에 해당하는 추가 검토 포인트가 없습니다. "
-                        "이는 회계처리의 적정성을 의미하지 않습니다."
-                    )
-
-                show_receivable_reviews(selected, review_points)
-                show_financial_charts(frame, growth_frame, ratio_frame)
-
-                if len(found_years) < 3:
-                    st.warning(
-                        f"최근 {len(found_years)}개 사업연도만 찾았습니다. "
-                        f"확인한 연도: {', '.join(map(str, checked_years))}"
-                    )
-                if missing:
-                    st.caption(
-                        "‘자료 없음’은 공시에 별도 항목이 없거나 현재 계정 매핑에서 "
-                        "금액을 확인하지 못한 경우입니다."
-                    )
-                    with st.expander(f"찾지 못한 계정 {len(missing)}건과 이유"):
-                        for reason in missing:
-                            st.write(f"- {reason}")
-
-                st.info(
-                    "기업별 계정명과 계정 ID가 다를 수 있으므로 일부 항목은 '자료 없음'으로 표시될 수 있습니다. "
-                    "최종 확인에는 DART 원문 사업보고서와 주석을 이용해 주세요."
-                )
-                st.caption(
-                    "위 지표는 공개 재무정보를 이용한 단순 계산 결과이며, "
-                    "특정 회계처리의 적정성이나 부정·오류 여부를 판단하지 않습니다."
+                show_financial_results(
+                    selected, found_years, checked_years,
+                    account_growth_limit, margin_change_limit, relationship_gap_limit,
                 )
         except DartError as exc:
             st.error(f"재무제표를 불러오지 못했습니다: {exc}")
