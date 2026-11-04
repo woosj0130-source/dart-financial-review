@@ -1,11 +1,13 @@
 """DART 최근 3개년 연결재무제표 핵심 계정 조회 Streamlit 앱."""
 
 import io
+import json
 import os
 import re
 import zipfile
-from datetime import date
+from datetime import date, datetime, timezone
 import xml.etree.ElementTree as ET
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 import requests
@@ -17,6 +19,9 @@ ANNUAL_REPORT_CODE = "11011"  # 사업보고서
 TRADE_RECEIVABLES = "매출채권"
 COMBINED_RECEIVABLES = "매출채권 및 기타채권"
 RECEIVABLE_ACCOUNTS = (TRADE_RECEIVABLES, COMBINED_RECEIVABLES)
+REVIEW_STATUSES = ("미검토", "추가 자료 필요", "원인 확인")
+REVIEW_FIELDS = ("corp_code", "account", "comparison", "status", "memo", "saved_at")
+REVIEW_MEMO_LIMIT = 2000
 COMBINED_RECEIVABLE_IDS = [
     "ifrs-full_TradeAndOtherCurrentReceivables",
     "ifrs_TradeAndOtherCurrentReceivables",
@@ -492,6 +497,122 @@ def find_review_points(
     return review_points
 
 
+def read_review_backup(content: bytes) -> list[dict]:
+    """이 앱에서 내보낸 검토 기록을 확인한 뒤 반환한다."""
+    backup = json.loads(content)
+    if not isinstance(backup, dict) or backup.get("version") != 1:
+        raise ValueError("지원하지 않는 검토 기록 파일입니다.")
+
+    records = backup.get("records")
+    if not isinstance(records, list):
+        raise ValueError("검토 기록 목록이 없습니다.")
+    for record in records:
+        if (
+            not isinstance(record, dict)
+            or record.keys() != set(REVIEW_FIELDS)
+            or not all(isinstance(value, str) for value in record.values())
+            or not re.fullmatch(r"[0-9]{8}", record["corp_code"])
+            or not re.fullmatch(r"[0-9]{4}→[0-9]{4}", record["comparison"])
+            or record["account"] not in RECEIVABLE_ACCOUNTS
+            or record["status"] not in REVIEW_STATUSES
+            or len(record["memo"]) > REVIEW_MEMO_LIMIT
+        ):
+            raise ValueError("검토 기록에 잘못된 항목이 있습니다.")
+        saved_at = datetime.fromisoformat(record["saved_at"])
+        if saved_at.utcoffset() != timezone.utc.utcoffset(None):
+            raise ValueError("검토 기록의 저장 시각을 확인해 주세요.")
+        record["saved_at"] = saved_at.isoformat()
+    return records
+
+
+@st.fragment
+def show_receivable_reviews(company: dict, review_points: list[dict]):
+    """채권 검토 상태와 메모를 추가하고 세션의 기록을 백업한다."""
+    st.subheader("채권 검토 기록")
+    st.caption(
+        "기록은 현재 세션에 보관됩니다. 새로 접속할 때 이어서 검토하려면 "
+        "JSON 파일로 내려받아 두세요."
+    )
+    records = st.session_state.setdefault("receivable_review_records", [])
+    with st.expander("검토 기록 불러오기"):
+        backup = st.file_uploader("이 앱에서 내려받은 JSON 파일", type="json")
+        if st.button("기록 불러오기", disabled=backup is None):
+            try:
+                incoming = read_review_backup(backup.getvalue())
+                # 기존 기록과 합치고 같은 파일을 다시 불러와도 중복되지 않게 한다.
+                merged = {
+                    tuple(record[field] for field in REVIEW_FIELDS): record
+                    for record in records + incoming
+                }
+                added_count = len(merged) - len(records)
+                records[:] = merged.values()
+                st.success(f"새 검토 기록 {added_count}건을 불러왔습니다.")
+            except (ValueError, RecursionError):
+                st.error("검토 기록을 읽지 못했습니다. 이 앱에서 내려받은 JSON 파일을 선택해 주세요.")
+
+    corp_code = company["corp_code"]
+    company_records = [record for record in records if record["corp_code"] == corp_code]
+    cases = {
+        (point["comparison"], point["account"])
+        for point in review_points
+        if point.get("account") in RECEIVABLE_ACCOUNTS
+    }
+    cases.update((record["comparison"], record["account"]) for record in company_records)
+    if cases:
+        comparison, account = st.selectbox(
+            "기록할 채권 검토 항목",
+            sorted(cases, reverse=True),
+            format_func=lambda case: f"{case[0]} · {case[1]}",
+            key=f"review-case-{corp_code}",
+        )
+        history = sorted(
+            (record for record in company_records
+             if (record["comparison"], record["account"]) == (comparison, account)),
+            key=lambda record: record["saved_at"],
+            reverse=True,
+        )
+        last = history[0] if history else None
+        current_status = last["status"] if last else REVIEW_STATUSES[0]
+        form_key = f"review-{corp_code}-{comparison}-{account}"
+        with st.form(form_key, clear_on_submit=True):
+            status = st.selectbox("검토 상태", (None, *REVIEW_STATUSES),
+                                  format_func=lambda value: value or "현재 상태 유지")
+            memo = st.text_area("검토 메모", max_chars=REVIEW_MEMO_LIMIT)
+            submitted = st.form_submit_button("검토 기록 저장")
+        if submitted:
+            status = status or current_status
+            if status == current_status and not memo.strip():
+                st.info("상태를 바꾸거나 메모를 입력하면 기록을 저장할 수 있습니다.")
+            else:
+                record = dict(
+                    corp_code=corp_code, account=account, comparison=comparison,
+                    status=status, memo=memo.strip(), saved_at=datetime.now(timezone.utc).isoformat(),
+                )
+                records.append(record)
+                history.insert(0, record)
+                st.success("검토 기록을 저장했습니다.")
+
+        st.write(f"**현재 상태** · {history[0]['status'] if history else current_status}")
+        if history:
+            with st.expander(f"변경 이력 {len(history)}건"):
+                for record in history:
+                    saved_at = datetime.fromisoformat(record["saved_at"]).astimezone(ZoneInfo("Asia/Seoul"))
+                    st.caption(f"{saved_at:%Y-%m-%d %H:%M:%S} KST · {record['status']}")
+                    if record["memo"]:
+                        st.text(record["memo"])
+    else:
+        st.info("현재 조회에서 기록할 채권 검토 항목이 없습니다.")
+
+    if records:
+        st.download_button(
+            "전체 검토 기록 내려받기",
+            data=json.dumps({"version": 1, "records": records}, ensure_ascii=False, indent=2),
+            file_name="dart_review_history.json",
+            mime="application/json",
+            on_click="ignore",
+        )
+
+
 @st.fragment
 def show_financial_charts(
     amount_frame: pd.DataFrame,
@@ -713,6 +834,7 @@ if matches:
                         "이는 회계처리의 적정성을 의미하지 않습니다."
                     )
 
+                show_receivable_reviews(selected, review_points)
                 show_financial_charts(frame, growth_frame, ratio_frame)
 
                 if len(found_years) < 3:
