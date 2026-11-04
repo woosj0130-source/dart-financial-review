@@ -16,6 +16,7 @@ BASE_URL = "https://opendart.fss.or.kr/api"
 ANNUAL_REPORT_CODE = "11011"  # 사업보고서
 TRADE_RECEIVABLES = "매출채권"
 COMBINED_RECEIVABLES = "매출채권 및 기타채권"
+RECEIVABLE_ACCOUNTS = (TRADE_RECEIVABLES, COMBINED_RECEIVABLES)
 COMBINED_RECEIVABLE_IDS = [
     "ifrs-full_TradeAndOtherCurrentReceivables",
     "ifrs_TradeAndOtherCurrentReceivables",
@@ -243,7 +244,7 @@ def collect_recent_three_years(api_key: str, corp_code: str):
 
 
 def make_result(found_years: list[tuple[int, list[dict]]]):
-    """연도별 핵심 계정 금액과 선택한 매출채권 공시 계정명을 반환한다."""
+    """연도별 핵심 계정 금액과 선택한 채권 계정의 공시 정보를 반환한다."""
     values = {account: {} for account in ACCOUNT_RULES}
     values[COMBINED_RECEIVABLES] = {}
     missing = []
@@ -256,7 +257,10 @@ def make_result(found_years: list[tuple[int, list[dict]]]):
             result_account = account
             if account == TRADE_RECEIVABLES and row:
                 source_name = row.get("account_nm") or ""
-                receivable_sources[f"{year}년"] = source_name or "계정명 없음"
+                receivable_sources[str(year)] = {
+                    "name": source_name or "계정명 없음",
+                    "receipt": row.get("rcept_no") or "",
+                }
                 normalized_name = normalize_name(source_name)
                 # 공시 계정명이 분명하면 계정 ID보다 이름을 우선한다.
                 if "기타채권" in normalized_name or (
@@ -277,6 +281,18 @@ def make_result(found_years: list[tuple[int, list[dict]]]):
     frame = frame.reindex(sorted(frame.columns), axis=1)
     frame.columns = [f"{year}년" for year in frame.columns]
     return frame, missing, receivable_sources
+
+
+def receivable_filing_links(comparison: str, sources: dict) -> list[str]:
+    """비교에 사용한 사업보고서의 접수번호로 DART 링크를 만든다."""
+    links = []
+    for year in comparison.split("→"):
+        receipt = str(sources.get(year, {}).get("receipt", ""))
+        if re.fullmatch(r"[0-9]{14}", receipt):
+            links.append(
+                f"[{year}년 사업보고서](https://dart.fss.or.kr/dsaf001/main.do?rcpNo={receipt})"
+            )
+    return links
 
 
 def format_won(value) -> str:
@@ -327,9 +343,7 @@ def calculate_financial_ratios(amount_frame: pd.DataFrame) -> pd.DataFrame:
         "재고자산비율": {},
         "영업현금흐름비율": {},
     }
-    receivable_accounts = amount_frame.index.intersection(
-        [TRADE_RECEIVABLES, COMBINED_RECEIVABLES]
-    )
+    receivable_accounts = amount_frame.index.intersection(RECEIVABLE_ACCOUNTS)
     for account in receivable_accounts:
         ratio_values[f"{account}비율"] = {}
 
@@ -391,6 +405,8 @@ def find_review_points(
                 review_points.append(
                     {
                         "title": f"{account}의 큰 전년 대비 변화",
+                        "account": account,
+                        "comparison": comparison,
                         "reason": (
                             f"{comparison} {account} 증감률이 {growth:+.1f}%로, "
                             f"설정 기준인 ±{account_growth_limit:.1f}% 이상입니다."
@@ -443,6 +459,8 @@ def find_review_points(
                 review_points.append(
                     {
                         "title": f"{account}과 매출액 증가율의 차이",
+                        "account": account,
+                        "comparison": comparison,
                         "reason": (
                             f"{comparison} {account} 증가율({account_growth:+.1f}%)이 "
                             f"매출액 증가율({revenue_growth:+.1f}%)보다 "
@@ -620,7 +638,9 @@ if matches:
                 st.caption("금액 단위: 원 / DART 사업보고서의 연결재무제표(CFS) 기준")
                 st.dataframe(frame.style.format(format_won), width="stretch")
                 if receivable_sources:
-                    source_labels = [f"{year} {name}" for year, name in receivable_sources.items()]
+                    source_labels = [
+                        f"{year}년 {source['name']}" for year, source in receivable_sources.items()
+                    ]
                     st.caption("채권 공시 계정명 · " + " / ".join(source_labels))
 
                 growth_frame = calculate_growth_rates(frame)
@@ -667,7 +687,26 @@ if matches:
                         with st.container(border=True):
                             st.markdown(f"**{number}. {point['title']}**")
                             st.write(point["reason"])
-                            st.caption(f"추가 확인 예시: {point['next_step']}")
+                            if point.get("account") in RECEIVABLE_ACCOUNTS:
+                                links = receivable_filing_links(
+                                    point["comparison"], receivable_sources
+                                )
+                                if links:
+                                    st.markdown("**공시 원문** · " + " / ".join(links))
+                                if len(links) < 2:
+                                    st.caption("일부 공시 링크가 없습니다. DART에서 해당 연도 사업보고서를 검색해 주세요.")
+                                st.write(
+                                    "**공개 공시에서 확인** · 연결재무제표 주석에서 채권 구성, "
+                                    "손실충당금, 공시된 연령분석을 확인합니다."
+                                )
+                                if selected["stock_code"] == "005380" and point["comparison"].endswith("→2025"):
+                                    st.caption("현대자동차 2025년 연결재무제표 주석 3번 ‘매출채권’에 채권 내역과 연령분석이 있습니다.")
+                                st.write(
+                                    "**회사에 요청할 자료** · 거래처별 채권 원장, 기말 이후 "
+                                    "회수 내역과 입금 증빙, 주요 거래처의 결제 조건을 확인합니다."
+                                )
+                            else:
+                                st.caption(f"추가 확인 예시: {point['next_step']}")
                 else:
                     st.success(
                         "현재 설정한 기준에 해당하는 추가 검토 포인트가 없습니다. "
