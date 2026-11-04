@@ -757,7 +757,9 @@ if matches:
                     f'**사업연도:** {min(years)}~{max(years)}년'
                 )
                 st.caption("금액 단위: 원 / DART 사업보고서의 연결재무제표(CFS) 기준")
-                st.dataframe(frame.style.format(format_won), width="stretch")
+                st.dataframe(
+                    frame.style.format(format_won), width="stretch", placeholder="자료 없음"
+                )
                 if receivable_sources:
                     source_labels = [
                         f"{year}년 {source['name']}" for year, source in receivable_sources.items()
@@ -780,6 +782,7 @@ if matches:
                         lambda value: format_percent(value, show_plus=True)
                     ),
                     width="stretch",
+                    placeholder="계산 불가",
                 )
 
                 ratio_frame = calculate_financial_ratios(frame)
@@ -787,6 +790,7 @@ if matches:
                 st.dataframe(
                     ratio_frame.style.format(format_percent),
                     width="stretch",
+                    placeholder="계산 불가",
                 )
 
                 review_points = find_review_points(
@@ -843,6 +847,10 @@ if matches:
                         f"확인한 연도: {', '.join(map(str, checked_years))}"
                     )
                 if missing:
+                    st.caption(
+                        "‘자료 없음’은 공시에 별도 항목이 없거나 현재 계정 매핑에서 "
+                        "금액을 확인하지 못한 경우입니다."
+                    )
                     with st.expander(f"찾지 못한 계정 {len(missing)}건과 이유"):
                         for reason in missing:
                             st.write(f"- {reason}")
