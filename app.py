@@ -650,7 +650,7 @@ def show_financial_charts(
     ratio_frame: pd.DataFrame,
 ):
     """조회 결과를 세 가지 간단한 그래프로 보여준다."""
-    st.subheader("6. 재무 변화 시각화")
+    st.subheader("재무 변화 시각화")
 
     st.markdown("**핵심 계정 금액 추세**")
     selected_account = st.selectbox(
@@ -706,143 +706,244 @@ def show_financial_results(
     """실시간 조회와 공시 예시의 결과를 같은 흐름으로 표시한다."""
     frame, missing, receivable_sources = make_result(found_years)
     years = [year for year, _ in found_years]
-    st.subheader("현대자동차 검토 예시" if demo else "2. 조회 결과")
-    st.write(
-        f'**기업:** {selected["corp_name"]}  |  '
-        f'**종목코드:** {selected["stock_code"] or "없음"}  |  '
-        f'**사업연도:** {min(years)}~{max(years)}년'
+    st.subheader("현대자동차 검토 예시" if demo else "조회 결과")
+    st.caption(
+        f'{selected["corp_name"]} · {selected["stock_code"] or "종목코드 없음"} · '
+        f'{min(years)}–{max(years)}년 연결재무제표'
     )
     growth_frame = calculate_growth_rates(frame)
-    if demo:
-        st.caption("2024·2025년 사업보고서에서 발췌한 시연용 수치입니다.")
-        comparison = growth_frame.columns[-1]
-        sales_growth = growth_frame.loc["매출액", comparison]
-        receivable_growth = growth_frame.loc[TRADE_RECEIVABLES, comparison]
-        sales, receivables, gap = st.columns(3)
-        sales.metric("매출액 증가율", format_percent(sales_growth, show_plus=True), border=True)
-        receivables.metric(
-            "유동 매출채권 증가율",
-            format_percent(receivable_growth, show_plus=True),
-            border=True,
-        )
-        gap.metric("매출 증가율과의 차이", f"{receivable_growth - sales_growth:+.1f}%p", border=True)
-
-    st.caption("금액 단위: 원 / DART 사업보고서의 연결재무제표(CFS) 기준")
-    st.dataframe(
-        frame.style.format(format_won), width="stretch", placeholder="자료 없음"
-    )
-    if receivable_sources:
-        source_labels = [
-            f"{year}년 {source['name']}" for year, source in receivable_sources.items()
-        ]
-        st.caption("채권 공시 계정명 · " + " / ".join(source_labels))
-
-    st.subheader("3. 전년 대비 증감률")
-    if (
-        TRADE_RECEIVABLES in frame.index
-        and COMBINED_RECEIVABLES in frame.index
-        and frame.loc[[TRADE_RECEIVABLES, COMBINED_RECEIVABLES]].notna().any(axis=1).all()
-    ):
-        st.warning(
-            "사업연도별 채권 계정의 범위가 다릅니다. "
-            "매출채권과 매출채권 및 기타채권 사이의 증감률은 계산하지 않습니다."
-        )
-    st.dataframe(
-        growth_frame.style.format(
-            lambda value: format_percent(value, show_plus=True)
-        ),
-        width="stretch",
-        placeholder="계산 불가",
-    )
 
     ratio_frame = calculate_financial_ratios(frame)
-    st.subheader("4. 주요 재무비율")
-    st.dataframe(
-        ratio_frame.style.format(format_percent),
-        width="stretch",
-        placeholder="계산 불가",
-    )
-
-    review_points = find_review_points(
-        frame,
-        growth_frame,
-        ratio_frame,
-        account_growth_limit,
-        margin_change_limit,
-        relationship_gap_limit,
-    )
-    st.subheader("5. 추가 검토 포인트")
-    st.caption(
-        "아래 항목은 설정한 숫자 기준에 해당한 항목을 정리한 것이며, "
-        "이상·위험·부정 또는 오류를 판정한 결과가 아닙니다."
-    )
-
-    if review_points:
-        for number, point in enumerate(review_points, start=1):
-            with st.container(border=True):
-                st.markdown(f"**{number}. {point['title']}**")
-                st.write(point["reason"])
-                if point.get("account") in RECEIVABLE_ACCOUNTS:
-                    links = receivable_filing_links(
-                        point["comparison"], receivable_sources
-                    )
-                    if links:
-                        st.markdown("**공시 원문** · " + " / ".join(links))
-                    if len(links) < 2:
-                        st.caption("일부 공시 링크가 없습니다. DART에서 해당 연도 사업보고서를 검색해 주세요.")
-                    st.write(
-                        "**공개 공시에서 확인** · 연결재무제표 주석에서 채권 구성, "
-                        "손실충당금, 공시된 연령분석을 확인합니다."
-                    )
-                    if selected["stock_code"] == "005380" and point["comparison"].endswith("→2025"):
-                        st.caption("현대자동차 2025년 연결재무제표 주석 3번 ‘매출채권’에 채권 내역과 연령분석이 있습니다.")
-                    st.write(
-                        "**회사에 요청할 자료** · 거래처별 채권 원장, 기말 이후 "
-                        "회수 내역과 입금 증빙, 주요 거래처의 결제 조건을 확인합니다."
-                    )
-                else:
-                    st.caption(f"추가 확인 예시: {point['next_step']}")
-    else:
-        st.success(
-            "현재 설정한 기준에 해당하는 추가 검토 포인트가 없습니다. "
-            "이는 회계처리의 적정성을 의미하지 않습니다."
+    review_tab, data_tab = st.tabs(["검토 결과", "재무 데이터"])
+    with review_tab:
+        review_points = find_review_points(
+            frame,
+            growth_frame,
+            ratio_frame,
+            account_growth_limit,
+            margin_change_limit,
+            relationship_gap_limit,
         )
-
-    show_receivable_reviews(selected, review_points)
-    show_financial_charts(frame, growth_frame, ratio_frame)
-
-    if not demo and len(found_years) < 3:
-        st.warning(
-            f"최근 {len(found_years)}개 사업연도만 찾았습니다. "
-            f"확인한 연도: {', '.join(map(str, checked_years))}"
-        )
-    if missing:
+        st.subheader("추가 검토 포인트")
         st.caption(
-            "‘자료 없음’은 공시에 별도 항목이 없거나 현재 계정 매핑에서 "
-            "금액을 확인하지 못한 경우입니다."
+            "아래 항목은 설정한 숫자 기준에 해당한 항목을 정리한 것이며, "
+            "이상·위험·부정 또는 오류를 판정한 결과가 아닙니다."
         )
-        with st.expander(f"찾지 못한 계정 {len(missing)}건과 이유"):
-            for reason in missing:
-                st.write(f"- {reason}")
 
-    st.info(
-        "기업별 계정명과 계정 ID가 다를 수 있으므로 일부 항목은 '자료 없음'으로 표시될 수 있습니다. "
-        "최종 확인에는 DART 원문 사업보고서와 주석을 이용해 주세요."
+        if review_points:
+            for number, point in enumerate(review_points, start=1):
+                with st.container(border=True, key=f"dart-review-card-{number}"):
+                    st.markdown(f"#### {number:02d} / {point['title']}")
+                    st.write(point["reason"])
+                    if point.get("account") in RECEIVABLE_ACCOUNTS:
+                        links = receivable_filing_links(
+                            point["comparison"], receivable_sources
+                        )
+                        if links:
+                            st.markdown("**공시 원문** · " + " / ".join(links))
+                        if len(links) < 2:
+                            st.caption("일부 공시 링크가 없습니다. DART에서 해당 연도 사업보고서를 검색해 주세요.")
+                        st.write(
+                            "**공개 공시에서 확인** · 연결재무제표 주석에서 채권 구성, "
+                            "손실충당금, 공시된 연령분석을 확인합니다."
+                        )
+                        if selected["stock_code"] == "005380" and point["comparison"].endswith("→2025"):
+                            st.caption("현대자동차 2025년 연결재무제표 주석 3번 ‘매출채권’에 채권 내역과 연령분석이 있습니다.")
+                        st.write(
+                            "**회사에 요청할 자료** · 거래처별 채권 원장, 기말 이후 "
+                            "회수 내역과 입금 증빙, 주요 거래처의 결제 조건을 확인합니다."
+                        )
+                    else:
+                        st.caption(f"추가 확인 예시: {point['next_step']}")
+        else:
+            st.success(
+                "현재 설정한 기준에 해당하는 추가 검토 포인트가 없습니다. "
+                "이는 회계처리의 적정성을 의미하지 않습니다."
+            )
+
+        show_receivable_reviews(selected, review_points)
+
+    with data_tab:
+        st.caption("금액 단위: 원 / DART 사업보고서의 연결재무제표(CFS) 기준")
+        st.dataframe(
+            frame.style.format(format_won), width="stretch", placeholder="자료 없음"
+        )
+        if receivable_sources:
+            source_labels = [
+                f"{year}년 {source['name']}" for year, source in receivable_sources.items()
+            ]
+            st.caption("채권 공시 계정명 · " + " / ".join(source_labels))
+
+        st.subheader("전년 대비 증감률")
+        if (
+            TRADE_RECEIVABLES in frame.index
+            and COMBINED_RECEIVABLES in frame.index
+            and frame.loc[[TRADE_RECEIVABLES, COMBINED_RECEIVABLES]].notna().any(axis=1).all()
+        ):
+            st.warning(
+                "사업연도별 채권 계정의 범위가 다릅니다. "
+                "매출채권과 매출채권 및 기타채권 사이의 증감률은 계산하지 않습니다."
+            )
+        st.dataframe(
+            growth_frame.style.format(
+                lambda value: format_percent(value, show_plus=True)
+            ),
+            width="stretch",
+            placeholder="계산 불가",
+        )
+
+        st.subheader("주요 재무비율")
+        st.dataframe(
+            ratio_frame.style.format(format_percent),
+            width="stretch",
+            placeholder="계산 불가",
+        )
+
+        show_financial_charts(frame, growth_frame, ratio_frame)
+
+        if not demo and len(found_years) < 3:
+            st.warning(
+                f"최근 {len(found_years)}개 사업연도만 찾았습니다. "
+                f"확인한 연도: {', '.join(map(str, checked_years))}"
+            )
+        if missing:
+            st.caption(
+                "‘자료 없음’은 공시에 별도 항목이 없거나 현재 계정 매핑에서 "
+                "금액을 확인하지 못한 경우입니다."
+            )
+            with st.expander(f"찾지 못한 계정 {len(missing)}건과 이유"):
+                for reason in missing:
+                    st.write(f"- {reason}")
+
+        st.info(
+            "기업별 계정명과 계정 ID가 다를 수 있으므로 일부 항목은 '자료 없음'으로 표시될 수 있습니다. "
+            "최종 확인에는 DART 원문 사업보고서와 주석을 이용해 주세요."
+        )
+        st.caption(
+            "위 지표는 공개 재무정보를 이용한 단순 계산 결과이며, "
+            "특정 회계처리의 적정성이나 부정·오류 여부를 판단하지 않습니다."
+        )
+
+
+def show_home():
+    """공시 검토 예시의 요약 수치와 실행 버튼을 보여준다."""
+    frame, _, _ = make_result(hyundai_demo_years())
+    growth = calculate_growth_rates(frame)["2024→2025"]
+    sales_growth = growth["매출액"]
+    receivable_growth = growth[TRADE_RECEIVABLES]
+    st.html(
+        """
+        <style>
+        .st-key-dart_hero {
+            background: #fff;
+            color: #292923;
+            border: 1px solid #e9e6dc;
+            border-top: 3px solid #efcd42;
+            border-radius: 0 0 12px 12px;
+            padding: clamp(1.2rem, 3.5vw, 3rem);
+        }
+        .dart-hero-content { color: #292923; word-break: keep-all; overflow-wrap: anywhere; }
+        .dart-hero-masthead {
+            display: flex; flex-wrap: wrap; justify-content: space-between; gap: .5rem;
+            align-items: center; padding-bottom: 1rem; border-bottom: 1px solid #ece9df;
+        }
+        .dart-hero-brand { font-weight: 750; letter-spacing: -.02em; }
+        .dart-hero-edition { color: #646258; font-size: .76rem; letter-spacing: .03em; }
+        .dart-hero-context {
+            margin: 1.55rem 0 .65rem; color: #666156; font-size: .8rem; font-weight: 650;
+        }
+        .dart-hero-content h1 {
+            color: #292923; font-family: "Noto Serif KR", "Batang", "AppleMyungjo", Georgia, serif;
+            font-size: clamp(1.85rem, 3.8vw, 3.2rem);
+            font-weight: 700; line-height: 1.22; letter-spacing: -.045em;
+            margin: 1.55rem 0 .65rem; padding: 0;
+        }
+        .dart-hero-lead { color: #5b594f; line-height: 1.6; margin: 0; }
+        .dart-hero-content .dart-hero-kpis {
+            display: grid; grid-template-columns: repeat(3, minmax(0, 1fr));
+            gap: .8rem; margin: 0; padding: 0;
+        }
+        .dart-hero-kpi { background: #fcfbf7; border: 1px solid #ece9df; padding: .85rem 1rem; }
+        .dart-hero-kpi:last-child { background: #fff6c9; border-color: #ead77d; }
+        .dart-hero-kpi dt { color: #5b594f; font-size: .82rem; margin: 0 0 .3rem; }
+        .dart-hero-kpi dd {
+            font-size: clamp(1.5rem, 3.2vw, 2.75rem); font-weight: 750; line-height: 1.05;
+            font-variant-numeric: tabular-nums; letter-spacing: -.055em; margin: 0;
+        }
+        .dart-hero-kpi:last-child dd { color: #554100; }
+        .st-key-dart_hero button {
+            background: #ffdc39; color: #202124; border: 1px solid #ffdc39;
+            border-radius: 4px; font-weight: 750; min-height: 2.7rem;
+        }
+        .st-key-dart_hero button:hover { background: #ffe675; color: #202124; }
+        .st-key-dart_hero button:focus-visible { outline: 2px solid #876900; outline-offset: 3px; }
+        [data-testid="stSidebar"] button[kind="primary"] {
+            background: #fff; color: #292923; border-color: #d6c98c;
+        }
+        [data-testid="stSidebar"] button[kind="primary"]:hover {
+            background: #fff6c9; color: #292923;
+        }
+        .dart-review-intro {
+            background: #fffdf3; color: #272620; border-left: 4px solid #e4b900;
+            padding: .8rem 1rem; line-height: 1.55; font-size: .9rem;
+        }
+        .dart-review-intro strong { margin-right: .55rem; }
+        [class*="st-key-dart-review-card-"] {
+            background: #fff; color: #202124; border-left: 4px solid #e4b900;
+        }
+        [class*="st-key-dart-review-card-"] :is(p, h4) { color: #202124; }
+        [class*="st-key-dart-review-card-"] a { color: #584608; }
+        [data-testid="stTabs"] [role="tab"][aria-selected="true"] {
+            color: #8c6c00; font-weight: 700;
+        }
+        [data-testid="stTabs"] :is([data-baseweb="tab-highlight"], .react-aria-SelectionIndicator) {
+            background-color: #c5a000;
+        }
+        @media (max-width: 640px) {
+            .dart-hero-content .dart-hero-kpis { grid-template-columns: 1fr; gap: .4rem; }
+            .dart-hero-kpi {
+                display: flex; justify-content: space-between; gap: .55rem; align-items: baseline;
+                padding: .65rem .75rem;
+            }
+            .dart-hero-kpi dt { margin: 0; }
+        }
+        </style>
+        """
     )
-    st.caption(
-        "위 지표는 공개 재무정보를 이용한 단순 계산 결과이며, "
-        "특정 회계처리의 적정성이나 부정·오류 여부를 판단하지 않습니다."
+    with st.container(key="dart_hero"):
+        st.html(
+            f"""
+            <section class="dart-hero-content" aria-labelledby="dart-hero-title">
+                <div class="dart-hero-masthead">
+                    <span class="dart-hero-brand">DART 공시 검토 도구</span>
+                    <span class="dart-hero-edition">OpenDART · 연결재무제표</span>
+                </div>
+                <h1 id="dart-hero-title">재무 변동에서 시작하는 공시 검토</h1>
+                <p class="dart-hero-lead">주요 계정의 변화를 비교하고, 공시 원문과 추가로 확인할 자료를 정리합니다.</p>
+                <div class="dart-hero-context">검토 예시 · 현대자동차 2024–2025년 연결재무제표</div>
+                <dl class="dart-hero-kpis">
+                    <div class="dart-hero-kpi"><dt>매출액 증가율</dt><dd>{sales_growth:+.1f}%</dd></div>
+                    <div class="dart-hero-kpi"><dt>유동 매출채권 증가율</dt><dd>{receivable_growth:+.1f}%</dd></div>
+                    <div class="dart-hero-kpi"><dt>증가율 차이</dt><dd>{receivable_growth - sales_growth:+.1f}%p</dd></div>
+                </dl>
+            </section>
+            """
+        )
+        if st.button("현대차 예시 열기", type="primary"):
+            st.session_state["show_hyundai_demo"] = True
+
+    st.html(
+        """
+        <div class="dart-review-intro">
+            <strong>검토 흐름</strong> 변동 확인 → 공시 근거 → 추가 확인 자료 → 검토 메모
+            <br><small>현대차 예시는 OpenDART API 키 없이 열 수 있습니다.</small>
+        </div>
+        """
     )
 
 
-st.set_page_config(page_title="DART 재무제표 조회", page_icon="📊", layout="wide")
-st.title("DART 공시 검토 도구")
-st.write("연결재무제표의 변동을 찾고 공시 근거와 후속 검토 기록을 한 화면에서 확인합니다.")
-with st.container(border=True):
-    st.markdown("**현대자동차 매출채권 검토 예시**")
-    st.caption("API 키 없이 2024·2025년 공시 수치로 검토 알림과 기록 기능을 체험할 수 있습니다.")
-    if st.button("현대차 예시 열기"):
-        st.session_state["show_hyundai_demo"] = True
+st.set_page_config(page_title="DART 공시 검토 도구", page_icon="📊", layout="wide")
+show_home()
 
 with st.sidebar:
     st.header("조회 설정")
@@ -906,7 +1007,7 @@ if st.session_state.get("show_hyundai_demo"):
         demo=True,
     )
 elif matches:
-    st.subheader("1. 조회할 기업 선택")
+    st.subheader("조회할 기업 선택")
 
     def company_label(company: dict) -> str:
         stock = company["stock_code"] or "비상장/종목코드 없음"
